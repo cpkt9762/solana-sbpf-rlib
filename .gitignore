@@ -1,0 +1,14 @@
+# Large data directories - use GitHub Releases instead
+rlibs/
+crates/
+releases/
+
+# Build artifacts
+run-state/
+run.log
+__pycache__/
+*.pyc
+
+# Solana toolchain
+solana/
+solana-release-*.tar.bz2
