@@ -40,7 +40,7 @@ Solana programs can be compiled for different sBPF bytecode versions:
 | Architecture | Bytecode | Solana Version | Description |
 |--------------|----------|----------------|-------------|
 | **sbfv1** | v0 | 1.x (1.4 - 1.18) | Legacy format, solana-labs/solana |
-| **sbfv3** | v3 | 2.x+ (Agave) | New format, anza-xyz/agave |
+| **sbfv2** | v3 | 2.x+ (Agave) | New format, anza-xyz/agave |
 
 ### File Naming Convention
 
@@ -49,7 +49,7 @@ lib{crate}-{version}-{sbf_arch}-{tools}.rlib
 
 Examples:
 libsolana_program-1.17.0-sbfv1-v1_48.rlib  # Solana 1.x, sBPF v0
-libsolana_program-2.0.0-sbfv3-v1_48.rlib   # Agave 2.x, sBPF v3
+libsolana_program-2.0.0-sbfv2-v1_48.rlib   # Agave 2.x, sBPF v3
 ```
 
 ## Version Coverage
@@ -57,12 +57,12 @@ libsolana_program-2.0.0-sbfv3-v1_48.rlib   # Agave 2.x, sBPF v3
 | Project | Versions | sBPF Arch |
 |---------|----------|-----------|
 | **Solana** (solana-labs/solana) | 1.17.x - 1.18.x | sbfv1 |
-| **Agave** (anza-xyz/agave) | 2.0.x - 4.0.x | sbfv3 |
+| **Agave** (anza-xyz/agave) | 2.0.x - 4.0.x | sbfv2 |
 | **Anchor** | 0.28.x - 1.0.0-rc | auto |
 | **Platform Tools** | v1.43+ | - |
 
 > **Note**: Solana development has moved from `solana-labs/solana` to `anza-xyz/agave`. 
-> Versions 2.x+ come from the Agave repository and use sBPF v3 (sbfv3).
+> Versions 2.x+ come from the Agave repository and use sBPF v3 (sbfv2).
 
 ## Building from Source
 
@@ -84,16 +84,16 @@ python3 get-rlibs-from-crate.py \
   --compiler-solana-version 1.18.16 \
   --fallback-compiler-solana-version 1.17.0 \
   --platform-tools-version v1.48 \
-  --sbf-arch sbfv1  # or sbfv3, both, auto
+  --sbf-arch sbfv1  # or sbfv2, both, auto
 ```
 
 ### Build Options
 
 | Option | Values | Description |
 |--------|--------|-------------|
-| `--sbf-arch` | `sbfv1`, `sbfv3`, `both`, `auto` | sBPF architecture to build |
+| `--sbf-arch` | `sbfv1`, `sbfv2`, `both`, `auto` | sBPF architecture to build |
 
-- `auto` (default): sbfv1 for 1.x, sbfv3 for 2.x+
+- `auto` (default): sbfv1 for 1.x, sbfv2 for 2.x+
 - `both`: Build both architectures for all versions
 
 ## Use Cases
@@ -109,7 +109,7 @@ python3 get-rlibs-from-crate.py \
 solana-program/
 ├── libsolana_program-1.17.0-sbfv1-v1_48.rlib
 ├── libsolana_program-1.18.0-sbfv1-v1_48.rlib
-├── libsolana_program-2.0.0-sbfv3-v1_48.rlib
+├── libsolana_program-2.0.0-sbfv2-v1_48.rlib
 ├── ...
 └── deps/
     └── (dependency rlibs with same naming)

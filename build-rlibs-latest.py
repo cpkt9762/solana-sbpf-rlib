@@ -473,7 +473,7 @@ def main() -> int:
     parser.add_argument("--compiler-solana-version", default="1.18.16")
     parser.add_argument("--fallback-compiler-solana-version", default="1.18.16")
     parser.add_argument("--platform-tools-version", default="v1.48")
-    parser.add_argument("--sbf-arch", choices=("sbfv1", "sbfv3", "both", "auto"), default="auto")
+    parser.add_argument("--sbf-arch", choices=("sbfv1", "sbfv2", "both", "auto"), default="auto")
     parser.add_argument("--scope", choices=("solana", "solana-all", "anchor", "all"), default="solana")
     parser.add_argument(
         "--latest-only",

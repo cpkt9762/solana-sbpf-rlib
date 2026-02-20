@@ -51,6 +51,7 @@ solana-epoch-rewards-hasher
 solana-epoch-schedule
 solana-example-mocks
 solana-faucet
+solana-faucet-cli
 solana-feature-gate-interface
 solana-fee
 solana-fee-calculator

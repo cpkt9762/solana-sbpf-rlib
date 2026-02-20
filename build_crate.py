@@ -225,8 +225,8 @@ def get_sbf_archs_for_version(crate_version: str) -> List[str]:
     try:
         major = int(crate_version.split(".")[0])
         if major >= 2:
-            # Agave 2.x+ : only sbfv3 (v3)
-            return ["sbfv3"]
+            # Agave 2.x+ : only sbfv2 (v3)
+            return ["sbfv2"]
         else:
             # Solana 1.x: only sbfv1 (v0)
             return ["sbfv1"]
@@ -237,7 +237,7 @@ def get_sbf_archs_for_version(crate_version: str) -> List[str]:
 
 def get_target_triple_for_arch(sbf_arch: str) -> str:
     """Map sbf arch to target triple directory name."""
-    if sbf_arch == "sbfv3":
+    if sbf_arch == "sbfv2":
         return "sbpfv3-solana-solana"
     return "sbf-solana-solana"
 
@@ -345,15 +345,15 @@ def build_crate(crate: str, version: str, solana_version: str,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--solana-version", type=str, required=True, help="Compiler toolchain Solana version")
-    parser.add_argument("--arch", type=str, choices=["sbfv1", "sbfv3", "both"], default=None,
-                        help="sBPF architecture: sbfv1 (v0), sbfv3 (v3), or both")
+    parser.add_argument("--arch", type=str, choices=["sbfv1", "sbfv2", "both"], default=None,
+                        help="sBPF architecture: sbfv1 (v0), sbfv2 (v3), or both")
     parser.add_argument("crate", type=str, help="Crate name")
     parser.add_argument("version", type=str, help="Crate version")
     args = parser.parse_args()
 
     sbf_archs = None
     if args.arch == "both":
-        sbf_archs = ["sbfv1", "sbfv3"]
+        sbf_archs = ["sbfv1", "sbfv2"]
     elif args.arch:
         sbf_archs = [args.arch]
 
