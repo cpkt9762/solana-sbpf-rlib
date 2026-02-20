@@ -122,7 +122,8 @@ def preflight_host_rust_toolchain():
     missing = [tool for tool in ("cargo", "rustc") if shutil.which(tool, path=tool_path) is None]
     if not missing:
         return True
-    print(f"{Fore.RED}Missing host tools: {, .join(missing)}.{Style.RESET_ALL}")
+    missing_str = ', '.join(missing)
+    print(f"{Fore.RED}Missing host tools: {missing_str}.{Style.RESET_ALL}")
     return False
 
 
@@ -196,7 +197,7 @@ def main():
                 continue
 
             for sbf_arch, rlib_path in built_rlibs:
-                target_name = f"lib{crate.replace(-, _)}-{version}-{sbf_arch}-{tools_tag}.rlib"
+                target_name = f"lib{crate.replace('-', '_')}-{version}-{sbf_arch}-{tools_tag}.rlib"
                 target_path = RLIBS_DIR / crate / target_name
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 

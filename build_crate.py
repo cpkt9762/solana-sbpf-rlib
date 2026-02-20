@@ -121,7 +121,7 @@ def ensure_host_rust_toolchain():
     if not missing:
         return True
     print(
-        f"{Fore.RED}Missing host tools: {, .join(missing)}. "
+        f"{Fore.RED}Missing host tools: {', '.join(missing)}. "
         "Install them first (e.g. apt: cargo rustc)."
         f"{Style.RESET_ALL}"
     )
@@ -274,7 +274,7 @@ def build_crate(crate: str, version: str, solana_version: str,
     if sbf_archs is None:
         sbf_archs = get_sbf_archs_for_version(version)
 
-    rlib_name = f"lib{crate.replace(-, _)}.rlib"
+    rlib_name = f"lib{crate.replace('-', '_')}.rlib"
     built_rlibs: List[Tuple[str, pathlib.Path]] = []
     last_status = ""
 
