@@ -4,7 +4,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
-from typing import Optional
+from typing import Optional, List, Tuple
 
 try:
     from colorama import Fore, Style, init
@@ -32,7 +32,6 @@ EDITION_2024_HINTS = (
 )
 AHASH_HINT = "use of unstable library feature 'build_hasher_simple_hash_one'"
 
-# blake3 v1.8.3 currently requires edition2024 and breaks old Cargo in Solana toolchains.
 BLAKE3_LOCK_V183 = """name = "blake3"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -122,7 +121,7 @@ def ensure_host_rust_toolchain():
     if not missing:
         return True
     print(
-        f"{Fore.RED}Missing host tools: {', '.join(missing)}. "
+        f"{Fore.RED}Missing host tools: {, .join(missing)}. "
         "Install them first (e.g. apt: cargo rustc)."
         f"{Style.RESET_ALL}"
     )
@@ -202,85 +201,163 @@ def patch_blake3_lock(crate_dir: pathlib.Path):
     return True
 
 
-def run_build(crate_dir: pathlib.Path, cargo_build_sbf: pathlib.Path, tools_version: Optional[str] = None):
+def clean_target_for_arch(crate_dir: pathlib.Path):
+    """Clean target directory to allow rebuilding with different arch."""
+    target_dir = crate_dir / "target"
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+
+
+def run_build(crate_dir: pathlib.Path, cargo_build_sbf: pathlib.Path, 
+              tools_version: Optional[str] = None, sbf_arch: Optional[str] = None):
     rustc_env = os.environ.copy()
     rustc_env["RUSTFLAGS"] = "-C overflow-checks=on"
     cmd = [str(cargo_build_sbf)]
     if tools_version:
         cmd.extend(["--tools-version", tools_version])
+    if sbf_arch:
+        cmd.extend(["--arch", sbf_arch])
     return run_cmd(cmd, cwd=crate_dir, env=rustc_env, stream=True)
 
 
-def build_crate(crate: str, version: str, solana_version: str, only_rlib=True, tools_version: Optional[str] = None):
+def get_sbf_archs_for_version(crate_version: str) -> List[str]:
+    """Determine which sBPF architectures to build based on crate version."""
+    try:
+        major = int(crate_version.split(".")[0])
+        if major >= 2:
+            # Agave 2.x+ : only sbfv2 (v3)
+            return ["sbfv2"]
+        else:
+            # Solana 1.x: only sbfv1 (v0)
+            return ["sbfv1"]
+    except (ValueError, IndexError):
+        # Default to sbfv1 for unknown versions
+        return ["sbfv1"]
+
+
+def get_target_triple_for_arch(sbf_arch: str) -> str:
+    """Map sbf arch to target triple directory name."""
+    if sbf_arch == "sbfv2":
+        return "sbpfv3-solana-solana"
+    return "sbf-solana-solana"
+
+
+def build_crate(crate: str, version: str, solana_version: str, 
+                only_rlib=True, tools_version: Optional[str] = None,
+                sbf_archs: Optional[List[str]] = None) -> Tuple[bool, str, List[Tuple[str, pathlib.Path]]]:
+    """
+    Build crate for specified sBPF architectures.
+    
+    Returns:
+        (success, last_status, [(arch, rlib_path), ...])
+    """
     del only_rlib
     if not ensure_host_rust_toolchain():
-        return False, "missing host rust toolchain (cargo/rustc)"
+        return False, "missing host rust toolchain (cargo/rustc)", []
     ensure_solana_cache_dir()
 
     if not ensure_solana_release(solana_version):
         print(f"{Fore.RED}Failed to install solana version {solana_version}{Style.RESET_ALL}")
-        return False, ""
+        return False, "", []
     if not ensure_crate(crate, version):
         print(f"{Fore.RED}Failed to fetch crate {crate} version {version}{Style.RESET_ALL}")
-        return False, ""
+        return False, "", []
 
     solana_dir = SOLANA_DIR / f"solana-release-{solana_version}"
     crate_dir = CRATES_DIR / f"{crate}-{version}"
     cargo_build_sbf = (solana_dir / "bin" / "cargo-build-sbf").resolve()
     if not cargo_build_sbf.exists():
         print(f"{Fore.RED}cargo-build-sbf not found at {cargo_build_sbf}{Style.RESET_ALL}")
-        return False, ""
+        return False, "", []
 
-    print(f"{Fore.BLUE}Building crate {crate} version {version} with toolchain {solana_version}...{Style.RESET_ALL}")
-    patched_ahash = False
-    patched_blake3 = False
-    patched_blake3_toml = False
+    # Determine architectures to build
+    if sbf_archs is None:
+        sbf_archs = get_sbf_archs_for_version(version)
+
+    rlib_name = f"lib{crate.replace(-, _)}.rlib"
+    built_rlibs: List[Tuple[str, pathlib.Path]] = []
     last_status = ""
 
-    for _attempt in range(1, 6):
-        code, status = run_build(crate_dir, cargo_build_sbf, tools_version=tools_version)
-        last_status = status
-        if code == 0:
-            print(f"{Fore.GREEN}Crate {crate} version {version} built successfully!{Style.RESET_ALL}")
-            return True, status
+    for sbf_arch in sbf_archs:
+        print(f"{Fore.BLUE}Building crate {crate} version {version} with toolchain {solana_version} "
+              f"[arch={sbf_arch}]...{Style.RESET_ALL}")
+        
+        # Clean target to rebuild with new arch
+        clean_target_for_arch(crate_dir)
+        
+        patched_ahash = False
+        patched_blake3 = False
+        patched_blake3_toml = False
+        built = False
 
-        if (not patched_ahash) and AHASH_HINT in status:
-            print(f"{Fore.YELLOW}[compat] applying ahash pin...{Style.RESET_ALL}")
-            patched_ahash = apply_ahash_patch(crate_dir)
-            if patched_ahash:
-                continue
+        for _attempt in range(1, 6):
+            code, status = run_build(crate_dir, cargo_build_sbf, 
+                                     tools_version=tools_version, sbf_arch=sbf_arch)
+            last_status = status
+            if code == 0:
+                print(f"{Fore.GREEN}Crate {crate} version {version} [{sbf_arch}] built successfully!{Style.RESET_ALL}")
+                built = True
+                break
 
-        if LOCKFILE_V4_HINT in status:
-            print(f"{Fore.YELLOW}[compat] downgrading Cargo.lock version 4 -> 3...{Style.RESET_ALL}")
-            if downgrade_lockfile_v4(crate_dir):
-                continue
-            print(f"{Fore.YELLOW}[compat] dropping Cargo.lock v4...{Style.RESET_ALL}")
-            if drop_lockfile(crate_dir):
-                continue
-
-        if (not patched_blake3) and any(h in status for h in EDITION_2024_HINTS):
-            print(f"{Fore.YELLOW}[compat] patching blake3 lock entry 1.8.3 -> 1.8.2...{Style.RESET_ALL}")
-            patched_blake3 = patch_blake3_lock(crate_dir)
-            if patched_blake3:
-                continue
-            if not patched_blake3_toml:
-                print(f"{Fore.YELLOW}[compat] pinning blake3 in Cargo.toml to 1.8.2...{Style.RESET_ALL}")
-                patched_blake3_toml = apply_blake3_pin_patch(crate_dir)
-                if patched_blake3_toml:
+            if (not patched_ahash) and AHASH_HINT in status:
+                print(f"{Fore.YELLOW}[compat] applying ahash pin...{Style.RESET_ALL}")
+                patched_ahash = apply_ahash_patch(crate_dir)
+                if patched_ahash:
                     continue
 
-        break
+            if LOCKFILE_V4_HINT in status:
+                print(f"{Fore.YELLOW}[compat] downgrading Cargo.lock version 4 -> 3...{Style.RESET_ALL}")
+                if downgrade_lockfile_v4(crate_dir):
+                    continue
+                print(f"{Fore.YELLOW}[compat] dropping Cargo.lock v4...{Style.RESET_ALL}")
+                if drop_lockfile(crate_dir):
+                    continue
 
-    print(f"{Fore.RED}Crate {crate} version {version} build failed!{Style.RESET_ALL}")
-    return False, last_status
+            if (not patched_blake3) and any(h in status for h in EDITION_2024_HINTS):
+                print(f"{Fore.YELLOW}[compat] patching blake3 lock entry 1.8.3 -> 1.8.2...{Style.RESET_ALL}")
+                patched_blake3 = patch_blake3_lock(crate_dir)
+                if patched_blake3:
+                    continue
+                if not patched_blake3_toml:
+                    print(f"{Fore.YELLOW}[compat] pinning blake3 in Cargo.toml to 1.8.2...{Style.RESET_ALL}")
+                    patched_blake3_toml = apply_blake3_pin_patch(crate_dir)
+                    if patched_blake3_toml:
+                        continue
+
+            break
+
+        if not built:
+            print(f"{Fore.RED}Crate {crate} version {version} [{sbf_arch}] build failed!{Style.RESET_ALL}")
+            continue
+
+        # Find the rlib
+        target_triple = get_target_triple_for_arch(sbf_arch)
+        rlib_path = crate_dir / "target" / target_triple / "release" / rlib_name
+        if rlib_path.exists():
+            built_rlibs.append((sbf_arch, rlib_path))
+        else:
+            print(f"{Fore.RED}Rlib for {crate}:{version} [{sbf_arch}] not found at {rlib_path}{Style.RESET_ALL}")
+
+    success = len(built_rlibs) > 0
+    return success, last_status, built_rlibs
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--solana-version", type=str, required=True, help="Compiler toolchain Solana version")
+    parser.add_argument("--arch", type=str, choices=["sbfv1", "sbfv2", "both"], default=None,
+                        help="sBPF architecture: sbfv1 (v0), sbfv2 (v3), or both")
     parser.add_argument("crate", type=str, help="Crate name")
     parser.add_argument("version", type=str, help="Crate version")
     args = parser.parse_args()
 
-    ok, _ = build_crate(args.crate, args.version, args.solana_version)
+    sbf_archs = None
+    if args.arch == "both":
+        sbf_archs = ["sbfv1", "sbfv2"]
+    elif args.arch:
+        sbf_archs = [args.arch]
+
+    ok, _, rlibs = build_crate(args.crate, args.version, args.solana_version, sbf_archs=sbf_archs)
+    if rlibs:
+        print(f"Built rlibs: {[(arch, str(p)) for arch, p in rlibs]}")
     raise SystemExit(0 if ok else 1)
