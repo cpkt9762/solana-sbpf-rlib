@@ -19,16 +19,6 @@ Download from [Releases](https://github.com/cpkt9762/solana-sbpf-rlib/releases):
 
 Download only what you need - 139 individual crate packages available.
 
-**Top crates by size:**
-| Crate | Size | Description |
-|-------|------|-------------|
-| solana-program | ~130MB | Core program library |
-| solana-merkle-tree | ~95MB | Merkle tree implementation |
-| solana-zk-sdk | ~75MB | Zero-knowledge SDK |
-| solana-curve25519 | ~65MB | Curve25519 crypto |
-| anchor-syn | ~50MB | Anchor syntax parsing |
-| anchor-spl | ~40MB | Anchor SPL integration |
-
 [View all individual packages →](https://github.com/cpkt9762/solana-sbpf-rlib/releases)
 
 ## Quick Start
@@ -38,43 +28,78 @@ Download only what you need - 139 individual crate packages available.
 brew install zstd  # macOS
 apt install zstd   # Ubuntu
 
-# Download bundle
+# Download and extract
 curl -LO https://github.com/cpkt9762/solana-sbpf-rlib/releases/download/v1.0.0/solana-sbpf-rlib-core.tar.zst
 tar -xf solana-sbpf-rlib-core.tar.zst
+```
 
-# Or download individual crate
-curl -LO https://github.com/cpkt9762/solana-sbpf-rlib/releases/download/v1.0.0/solana-program.tar.zst
-tar -xf solana-program.tar.zst
+## sBPF Architecture Versions
+
+Solana programs can be compiled for different sBPF bytecode versions:
+
+| Architecture | Bytecode | Solana Version | Description |
+|--------------|----------|----------------|-------------|
+| **sbfv1** | v0 | 1.x (1.4 - 1.18) | Legacy format, solana-labs/solana |
+| **sbfv2** | v3 | 2.x+ (Agave) | New format, anza-xyz/agave |
+
+### File Naming Convention
+
+```
+lib{crate}-{version}-{sbf_arch}-{tools}.rlib
+
+Examples:
+libsolana_program-1.17.0-sbfv1-v1_48.rlib  # Solana 1.x, sBPF v0
+libsolana_program-2.0.0-sbfv2-v1_48.rlib   # Agave 2.x, sBPF v3
 ```
 
 ## Version Coverage
 
-| Project | Versions |
-|---------|----------|
-| **Solana** (solana-labs/solana) | 1.17.x - 1.18.x |
-| **Agave** (anza-xyz/agave) | 2.0.x - 4.0.x |
-| **Anchor** | 0.28.x - 1.0.0-rc |
-| **Platform Tools** | v1.43+ |
+| Project | Versions | sBPF Arch |
+|---------|----------|-----------|
+| **Solana** (solana-labs/solana) | 1.17.x - 1.18.x | sbfv1 |
+| **Agave** (anza-xyz/agave) | 2.0.x - 4.0.x | sbfv2 |
+| **Anchor** | 0.28.x - 1.0.0-rc | auto |
+| **Platform Tools** | v1.43+ | - |
 
 > **Note**: Solana development has moved from `solana-labs/solana` to `anza-xyz/agave`. 
-> Versions 2.x+ come from the Agave repository.
+> Versions 2.x+ come from the Agave repository and use sBPF v3 (sbfv2).
 
 ## Building from Source
 
 ```bash
 # Requirements: Solana CLI, Rust, cargo-build-sbf
 
+# Build with auto-detected architecture (recommended)
 ./build-rlibs-from-index.sh \
   --solana-version 1.18.16 \
   --compiler-solana-version 1.18.16 \
   --fallback-compiler-solana-version 1.17.0 \
   --platform-tools-version v1.43
+
+# Build specific architecture
+python3 get-rlibs-from-crate.py \
+  --crate solana-program \
+  --version 1.18.0 \
+  --solana-version 1.18.16 \
+  --compiler-solana-version 1.18.16 \
+  --fallback-compiler-solana-version 1.17.0 \
+  --platform-tools-version v1.48 \
+  --sbf-arch sbfv1  # or sbfv2, both, auto
 ```
+
+### Build Options
+
+| Option | Values | Description |
+|--------|--------|-------------|
+| `--sbf-arch` | `sbfv1`, `sbfv2`, `both`, `auto` | sBPF architecture to build |
+
+- `auto` (default): sbfv1 for 1.x, sbfv2 for 2.x+
+- `both`: Build both architectures for all versions
 
 ## Use Cases
 
 - **IDA Pro**: FLIRT signature generation
-- **Ghidra**: Function identification
+- **Ghidra**: Function identification  
 - **Binary Ninja**: Signature matching
 - **General**: Solana program reverse engineering
 
@@ -82,12 +107,12 @@ tar -xf solana-program.tar.zst
 
 ```
 solana-program/
-├── libsolana_program-1.17.0-v1_48.rlib
-├── libsolana_program-1.18.0-v1_48.rlib
-├── libsolana_program-2.0.0-v1_48.rlib
+├── libsolana_program-1.17.0-sbfv1-v1_48.rlib
+├── libsolana_program-1.18.0-sbfv1-v1_48.rlib
+├── libsolana_program-2.0.0-sbfv2-v1_48.rlib
 ├── ...
 └── deps/
-    └── (dependency rlibs)
+    └── (dependency rlibs with same naming)
 ```
 
 ## License
