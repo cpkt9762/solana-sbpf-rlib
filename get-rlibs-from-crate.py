@@ -130,7 +130,7 @@ def parse_sbf_archs(args, version: str) -> List[str]:
     if args.sbf_arch == "auto":
         return get_sbf_archs_for_version(version)
     elif args.sbf_arch == "both":
-        return ["sbfv1", "sbfv2"]
+        return ["sbfv1", "sbfv3"]
     else:
         return [args.sbf_arch]
 
@@ -142,7 +142,7 @@ def main():
     parser.add_argument("--fallback-compiler-solana-version", required=True)
     parser.add_argument("--disable-compiler-fallback", action="store_true")
     parser.add_argument("--platform-tools-version", required=True)
-    parser.add_argument("--sbf-arch", choices=["sbfv1", "sbfv2", "both", "auto"], default="auto")
+    parser.add_argument("--sbf-arch", choices=["sbfv1", "sbfv3", "both", "auto"], default="auto")
     parser.add_argument("--cleanup-target", action="store_true")
     parser.add_argument("--cleanup-solana", action="store_true")
     parser.add_argument("--extract-deps", action="store_true")
