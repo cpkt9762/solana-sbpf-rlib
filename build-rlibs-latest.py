@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """
-Batch-download and build Solana/Anchor crate rlibs using get-rlibs-from-crate.py.
+Batch-download and build Solana/Anchor crate rlibs.
 
-Default behavior is tuned for Solana 1.18.16:
-- scope: solana
-- mode: latest version per crate
+Key changes vs old version:
+- No more fixed --solana-version / --compiler-solana-version flags.
+  Toolchain is automatically selected per crate+version via get_toolchain_for_crate().
+- Multi-process parallel build (--workers, default = min(8, cpu_count)).
+- Output rlib filenames include both solana short tag and platform-tools tag:
+    lib{crate}-{version}-{arch}-{solana_tag}-pt{pt_tag}.rlib
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import json
+import multiprocessing
 import os
 import pathlib
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -32,9 +38,6 @@ DEFAULT_TIMEOUT = 45
 DEFAULT_RETRIES = 6
 
 # Static whitelist of crates known to appear in on-chain SBF program builds.
-# Used by scope=solana (default).  For dynamic discovery use scope=solana-all.
-# Third-party Rust libs (borsh, serde, etc.) are captured via deps/ extraction
-# in get-rlibs-from-crate.py --extract-deps, so they don't need to be listed here.
 SBF_PROGRAM_CRATES: frozenset[str] = frozenset({
     # --- CORE: solana-program and its transitive micro-crates (2.x era) ---
     "solana-program",
@@ -140,29 +143,35 @@ def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+_print_lock = threading.Lock()
+
+
 def log(msg: str) -> None:
-    print(f"[*] {msg}")
+    with _print_lock:
+        print(f"[*] {msg}", flush=True)
 
 
 def warn(msg: str) -> None:
-    print(f"[!] {msg}", file=sys.stderr)
+    with _print_lock:
+        print(f"[!] {msg}", file=sys.stderr, flush=True)
 
 
 def die(msg: str, code: int = 1) -> None:
-    print(f"[x] {msg}", file=sys.stderr)
+    with _print_lock:
+        print(f"[x] {msg}", file=sys.stderr, flush=True)
     raise SystemExit(code)
 
 
 def http_get(url: str, timeout: int = DEFAULT_TIMEOUT, retries: int = DEFAULT_RETRIES) -> bytes:
     headers = {
-        "User-Agent": "solana-rlib-batch-builder/1.0",
+        "User-Agent": "solana-rlib-batch-builder/2.0",
         "Accept": "application/json,text/plain,*/*",
     }
     err: Exception | None = None
     for i in range(1, retries + 1):
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec - controlled URLs
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec
                 status = getattr(resp, "status", 200)
                 if 200 <= status < 300:
                     return resp.read()
@@ -208,7 +217,6 @@ def fetch_solana_crate_list() -> list[str]:
 
 
 def fetch_anchor_crate_list() -> list[str]:
-    # Seed list covers official anchor workspace crates and historical names.
     seed = {
         "anchor-lang",
         "anchor-spl",
@@ -229,8 +237,6 @@ def fetch_anchor_crate_list() -> list[str]:
         "anchor-syn",
         "avm",
     }
-
-    # Include dynamically discovered anchor-* deps from latest anchor-lang/anchor-spl.
     for root in ("anchor-lang", "anchor-spl"):
         versions = fetch_non_yanked_versions(root)
         if not versions:
@@ -302,11 +308,9 @@ def version_sort_key(ver: str) -> tuple[tuple[int, ...], tuple[int, tuple[Any, .
 def resolve_crates(scope: str, versions_dir: pathlib.Path) -> list[str]:
     crates: set[str] = set()
     if scope == "solana":
-        # Static whitelist — no network fetch, stable and controllable.
         crates.update(SBF_PROGRAM_CRATES)
         log(f"Using static whitelist: {len(SBF_PROGRAM_CRATES)} crates")
     elif scope in ("solana-all", "all"):
-        # Dynamic discovery from GitHub — may find new crates but is less stable.
         try:
             solana_crates = fetch_solana_crate_list()
             (versions_dir / "solana-rust-crates.txt").write_text("\n".join(solana_crates) + "\n", encoding="utf-8")
@@ -335,7 +339,9 @@ def resolve_versions_for_crate(crate: str, versions_dir: pathlib.Path, latest_on
     try:
         versions = fetch_non_yanked_versions(crate)
         if versions:
-            (versions_dir / f"{crate}.txt").write_text("\n".join(sorted(set(versions), key=lambda s: s)) + "\n", encoding="utf-8")
+            (versions_dir / f"{crate}.txt").write_text(
+                "\n".join(sorted(set(versions), key=lambda s: s)) + "\n", encoding="utf-8"
+            )
     except Exception as e:
         warn(f"{crate}: online versions fetch failed, using local index ({e})")
         versions = read_lines(versions_dir / f"{crate}.txt")
@@ -349,26 +355,53 @@ def resolve_versions_for_crate(crate: str, versions_dir: pathlib.Path, latest_on
     return versions
 
 
-def load_state(path: pathlib.Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"meta": {"created_at": now_iso()}, "crates": {}}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"meta": {"created_at": now_iso()}, "crates": {}}
+# ---------------------------------------------------------------------------
+# State management (thread-safe)
+# ---------------------------------------------------------------------------
+
+class StateManager:
+    def __init__(self, path: pathlib.Path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._state = self._load()
+
+    def _load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"meta": {"created_at": now_iso()}, "crates": {}}
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"meta": {"created_at": now_iso()}, "crates": {}}
+
+    def get_crate_status(self, crate: str) -> str | None:
+        with self._lock:
+            return self._state.get("crates", {}).get(crate, {}).get("status")
+
+    def update_crate(self, crate: str, data: dict[str, Any]) -> None:
+        with self._lock:
+            self._state.setdefault("crates", {})[crate] = data
+            self._save()
+
+    def set_meta(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._state.setdefault("meta", {})[key] = value
+            self._save()
+
+    def _save(self) -> None:
+        self._state.setdefault("meta", {})
+        self._state["meta"]["updated_at"] = now_iso()
+        self.path.write_text(json.dumps(self._state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return json.loads(json.dumps(self._state))
 
 
-def save_state(path: pathlib.Path, state: dict[str, Any]) -> None:
-    state.setdefault("meta", {})
-    state["meta"]["updated_at"] = now_iso()
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
+# ---------------------------------------------------------------------------
+# Per-crate build runner
+# ---------------------------------------------------------------------------
 
 def classify_result(log_text: str, rc: int) -> tuple[str, int, int]:
-    """
-    Return (status, built, total)
-    status in: ok|partial|no_rlib|failed
-    """
     done_match = re.findall(r"Done:\s+(\d+)/(\d+)\s+versions produced rlibs", log_text)
     if rc == 0:
         if done_match:
@@ -391,43 +424,40 @@ def run_crate_build(
     factory_dir: pathlib.Path,
     crate: str,
     versions: list[str],
-    args: argparse.Namespace,
+    latest_only: bool,
+    cleanup_target: bool,
+    cleanup_solana: bool,
+    stream: bool,
+    dry_run: bool,
     log_file: pathlib.Path,
 ) -> tuple[int, str]:
+    """
+    Invoke get-rlibs-from-crate.py for a single crate.
+    No toolchain flags needed — routing is done inside get-rlibs-from-crate.py.
+    """
     cmd = [
         sys.executable,
         str(factory_dir / "get-rlibs-from-crate.py"),
-        "--solana-version",
-        args.solana_version,
-        "--compiler-solana-version",
-        args.compiler_solana_version,
-        "--fallback-compiler-solana-version",
-        args.fallback_compiler_solana_version,
-        "--platform-tools-version",
-        args.platform_tools_version,
-        "--sbf-arch", args.sbf_arch,
-        "--crate",
-        crate,
+        "--crate", crate,
     ]
 
     tmp_versions_file: pathlib.Path | None = None
-    if args.latest_only:
+    if latest_only:
         cmd.extend(["--version", versions[0]])
     else:
-        # Use a temp versions file so get-rlibs-from-crate.py handles retries/version loop.
         fd, tmp = tempfile.mkstemp(prefix=f"{crate}-", suffix=".versions.txt")
         os.close(fd)
         tmp_versions_file = pathlib.Path(tmp)
         tmp_versions_file.write_text("\n".join(versions) + "\n", encoding="utf-8")
         cmd.extend(["--versions-file", str(tmp_versions_file)])
 
-    if args.cleanup_target:
+    if cleanup_target:
         cmd.append("--cleanup-target")
-    if args.cleanup_solana:
+    if cleanup_solana:
         cmd.append("--cleanup-solana")
     cmd.append("--extract-deps")
 
-    if args.dry_run:
+    if dry_run:
         if tmp_versions_file and tmp_versions_file.exists():
             tmp_versions_file.unlink()
         return (0, "DRY-RUN: " + " ".join(cmd))
@@ -451,39 +481,84 @@ def run_crate_build(
             captured.append(line)
             lf.write(line)
             lf.flush()
-            if args.stream:
-                # Stream child output to the main terminal in real time.
-                sys.stdout.write(line)
-                sys.stdout.flush()
+            if stream:
+                with _print_lock:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
         proc.stdout.close()
         rc = proc.wait()
 
     if tmp_versions_file and tmp_versions_file.exists():
         tmp_versions_file.unlink()
 
-    text = "".join(captured) if not args.stream else log_file.read_text(encoding="utf-8", errors="ignore")
-    return (rc, text)
+    return (rc, "".join(captured))
 
+
+# ---------------------------------------------------------------------------
+# Worker function (runs in separate process)
+# ---------------------------------------------------------------------------
+
+def _worker(args_tuple) -> dict[str, Any]:
+    """
+    Called by ProcessPoolExecutor for each crate.
+    Returns a dict with crate result data.
+    """
+    (
+        factory_dir_str,
+        crate,
+        versions,
+        latest_only,
+        cleanup_target,
+        cleanup_solana,
+        stream,
+        dry_run,
+        log_file_str,
+    ) = args_tuple
+
+    factory_dir = pathlib.Path(factory_dir_str)
+    log_file = pathlib.Path(log_file_str)
+
+    rc, log_text = run_crate_build(
+        factory_dir=factory_dir,
+        crate=crate,
+        versions=versions,
+        latest_only=latest_only,
+        cleanup_target=cleanup_target,
+        cleanup_solana=cleanup_solana,
+        stream=stream,
+        dry_run=dry_run,
+        log_file=log_file,
+    )
+    status, built, total = classify_result(log_text, rc)
+    return {
+        "crate": crate,
+        "status": status,
+        "built": built,
+        "total": total,
+        "log": str(log_file),
+        "versions_requested": versions if len(versions) <= 8 else [versions[0], "...", versions[-1]],
+        "last_run": now_iso(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> int:
+    cpu_count = multiprocessing.cpu_count()
+    default_workers = min(8, cpu_count)
+
     parser = argparse.ArgumentParser(
-        description="Build Solana/Anchor crate rlibs (default: Solana 1.18.16, all versions per crate)."
+        description="Build Solana/Anchor crate rlibs with per-version toolchain routing and parallel builds."
     )
-    parser.add_argument("--solana-version", default="1.18.16")
-    parser.add_argument("--compiler-solana-version", default="1.18.16")
-    parser.add_argument("--fallback-compiler-solana-version", default="1.18.16")
-    parser.add_argument("--platform-tools-version", default="v1.48")
-    parser.add_argument("--sbf-arch", choices=("sbfv1", "sbfv2", "both", "auto"), default="auto")
     parser.add_argument("--scope", choices=("solana", "solana-all", "anchor", "all"), default="solana")
     parser.add_argument(
-        "--latest-only",
-        action="store_true",
-        default=False,
-        help="Build only latest non-yanked version per crate (default: build all versions)",
+        "--latest-only", action="store_true", default=False,
+        help="Build only latest non-yanked version per crate",
     )
     parser.add_argument(
-        "--all-versions",
-        action="store_true",
+        "--all-versions", action="store_true",
         help="Build all non-yanked versions per crate (default behavior)",
     )
     parser.add_argument("--include", help="Only process crates matching regex")
@@ -493,9 +568,12 @@ def main() -> int:
     parser.add_argument("--cleanup-target", action="store_true")
     parser.add_argument("--cleanup-solana", action="store_true")
     parser.add_argument(
-        "--no-stream",
-        action="store_true",
-        help="Do not mirror child build output to main terminal (still written to per-crate logs)",
+        "--workers", type=int, default=default_workers,
+        help=f"Number of parallel build workers (default: {default_workers}, detected CPUs: {cpu_count})",
+    )
+    parser.add_argument(
+        "--no-stream", action="store_true",
+        help="Do not mirror child build output to main terminal",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--factory-dir", default=str(pathlib.Path(__file__).resolve().parent))
@@ -531,103 +609,144 @@ def main() -> int:
     if not crates:
         die("no crates selected after filters")
 
-    state = load_state(state_file)
-    state.setdefault("crates", {})
-    state.setdefault("meta", {})
-    state["meta"]["config"] = {
-        "solana_version": args.solana_version,
-        "compiler_solana_version": args.compiler_solana_version,
-        "fallback_compiler_solana_version": args.fallback_compiler_solana_version,
-        "platform_tools_version": args.platform_tools_version,
+    state_mgr = StateManager(state_file)
+    state_mgr.set_meta("config", {
         "scope": args.scope,
         "latest_only": bool(args.latest_only),
-    }
+        "workers": args.workers,
+        "toolchain": "auto-routed-per-version",
+    })
 
-    ok = partial = no_rlib = fail = skip = 0
+    ok_count = partial_count = no_rlib_count = fail_count = skip_count = 0
     summary_lines = [
         f"selected_crates={len(crates)}",
         f"scope={args.scope}",
         f"latest_only={str(args.latest_only).lower()}",
-        f"solana_version={args.solana_version}",
-        f"compiler_solana_version={args.compiler_solana_version}",
-        f"fallback_compiler_solana_version={args.fallback_compiler_solana_version}",
-        f"platform_tools_version={args.platform_tools_version}",
+        f"workers={args.workers}",
+        f"toolchain=auto",
     ]
 
     log(f"Selected {len(crates)} crates (scope={args.scope}, latest_only={args.latest_only})")
+    log(f"Parallel workers: {args.workers} (CPUs detected: {cpu_count})")
 
-    for i, crate in enumerate(crates, start=1):
-        existing = state["crates"].get(crate, {})
-        prev_status = existing.get("status")
+    # Resolve versions for all crates first (serial, network-bound)
+    crate_versions: dict[str, list[str]] = {}
+    crates_to_build: list[str] = []
+
+    for crate in crates:
+        prev_status = state_mgr.get_crate_status(crate)
         if not args.force and prev_status in {"ok", "partial", "no_rlib", "failed"}:
-            log(f"[{i}/{len(crates)}] skip {crate}: already {prev_status}")
-            skip += 1
+            log(f"skip {crate}: already {prev_status}")
+            skip_count += 1
             continue
 
         versions = resolve_versions_for_crate(crate, versions_dir, args.latest_only)
         if not versions:
-            warn(f"[{i}/{len(crates)}] fail {crate}: no versions found")
-            fail += 1
-            state["crates"][crate] = {
+            warn(f"fail {crate}: no versions found")
+            fail_count += 1
+            state_mgr.update_crate(crate, {
                 "status": "failed",
                 "error": "no versions found",
                 "last_run": now_iso(),
-            }
+            })
             summary_lines.append(f"fail={crate} reason=no_versions")
-            save_state(state_file, state)
             continue
 
-        log(f"[{i}/{len(crates)}] build {crate} ({'latest' if args.latest_only else f'{len(versions)} versions'})")
+        crate_versions[crate] = versions
+        crates_to_build.append(crate)
+
+    log(f"Crates to build: {len(crates_to_build)} (skipped: {skip_count})")
+
+    if not crates_to_build:
+        log("Nothing to build.")
+        summary_lines.extend([
+            f"ok={ok_count}", f"partial={partial_count}",
+            f"no_rlib={no_rlib_count}", f"fail={fail_count}", f"skip={skip_count}",
+        ])
+        summary_file.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+        return 0
+
+    # Build work items for the executor
+    work_items = []
+    for crate in crates_to_build:
+        versions = crate_versions[crate]
         log_file = logs_dir / f"{crate}.log"
-        rc, log_text = run_crate_build(factory_dir, crate, versions, args, log_file)
-        status, built, total = classify_result(log_text, rc)
+        work_items.append((
+            str(factory_dir),
+            crate,
+            versions,
+            args.latest_only,
+            args.cleanup_target,
+            args.cleanup_solana,
+            args.stream,
+            args.dry_run,
+            str(log_file),
+        ))
 
-        if status == "ok":
-            ok += 1
-            summary_lines.append(f"ok={crate}")
-        elif status == "partial":
-            partial += 1
-            summary_lines.append(f"partial={crate} built={built} total={total}")
-        elif status == "no_rlib":
-            no_rlib += 1
-            summary_lines.append(f"no_rlib={crate}")
-        else:
-            fail += 1
-            summary_lines.append(f"fail={crate}")
+    total = len(work_items)
+    completed = 0
 
-        state["crates"][crate] = {
-            "status": status,
-            "built": built,
-            "total": total,
-            "last_run": now_iso(),
-            "log": str(log_file),
-            "versions_requested": versions if len(versions) <= 8 else [versions[0], "...", versions[-1]],
+    # Run in parallel using ProcessPoolExecutor
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
+        future_to_crate = {
+            executor.submit(_worker, item): item[1]  # item[1] = crate name
+            for item in work_items
         }
-        save_state(state_file, state)
 
-        if status == "failed":
-            warn(f"[{i}/{len(crates)}] failed {crate} (log: {log_file})")
-        elif status == "partial":
-            warn(f"[{i}/{len(crates)}] partial {crate}: {built}/{total} (log: {log_file})")
-        elif status == "no_rlib":
-            warn(f"[{i}/{len(crates)}] no_rlib {crate} (log: {log_file})")
+        for future in concurrent.futures.as_completed(future_to_crate):
+            crate = future_to_crate[future]
+            completed += 1
+            try:
+                result = future.result()
+            except Exception as exc:
+                warn(f"[{completed}/{total}] {crate}: worker exception: {exc}")
+                status = "failed"
+                result = {
+                    "crate": crate,
+                    "status": "failed",
+                    "built": 0,
+                    "total": 0,
+                    "last_run": now_iso(),
+                    "error": str(exc),
+                }
 
-    summary_lines.extend(
-        [
-            f"ok={ok}",
-            f"partial={partial}",
-            f"no_rlib={no_rlib}",
-            f"fail={fail}",
-            f"skip={skip}",
-        ]
-    )
+            status = result["status"]
+            built = result.get("built", 0)
+            total_ver = result.get("total", 0)
+
+            if status == "ok":
+                ok_count += 1
+                log(f"[{completed}/{total}] ok     {crate}")
+                summary_lines.append(f"ok={crate}")
+            elif status == "partial":
+                partial_count += 1
+                warn(f"[{completed}/{total}] partial {crate}: {built}/{total_ver}")
+                summary_lines.append(f"partial={crate} built={built} total={total_ver}")
+            elif status == "no_rlib":
+                no_rlib_count += 1
+                warn(f"[{completed}/{total}] no_rlib {crate}")
+                summary_lines.append(f"no_rlib={crate}")
+            else:
+                fail_count += 1
+                warn(f"[{completed}/{total}] FAILED  {crate} (log: {result.get('log', '?')})")
+                summary_lines.append(f"fail={crate}")
+
+            state_mgr.update_crate(crate, result)
+
+    summary_lines.extend([
+        f"ok={ok_count}",
+        f"partial={partial_count}",
+        f"no_rlib={no_rlib_count}",
+        f"fail={fail_count}",
+        f"skip={skip_count}",
+    ])
     summary_file.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 
-    log(f"Done: ok={ok} partial={partial} no_rlib={no_rlib} fail={fail} skip={skip}")
+    log(f"Done: ok={ok_count} partial={partial_count} no_rlib={no_rlib_count} fail={fail_count} skip={skip_count}")
     log(f"State: {state_file}")
     log(f"Summary: {summary_file}")
 
-    return 1 if fail > 0 else 0
+    return 1 if fail_count > 0 else 0
 
 
 if __name__ == "__main__":
