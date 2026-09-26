@@ -7,13 +7,7 @@ usage() {
 Usage:
   build-rlibs-from-index.sh [options]
 
-Required options:
-  --solana-version <ver>                 Solana release policy version
-  --compiler-solana-version <ver>        Primary compiler toolchain version
-  --fallback-compiler-solana-version <v> Fallback compiler toolchain version
-  --platform-tools-version <v>           cargo-build-sbf --tools-version value
-
-Optional options:
+Options:
   --scope <all|solana|anchor>            Crate scope (default: all)
   --versions-dir <path>                  Versions index directory
   --state-dir <path>                     State/log directory
@@ -29,6 +23,10 @@ Notes:
   - Crate list comes from versions/{solana-rust-crates.txt,anchor-crates.txt}.
   - Per-crate versions file must exist at versions/<crate>.txt.
   - Missing crates in versions/missing-crates.txt are skipped automatically.
+  - The toolchain is chosen per crate version by build_crate.py, so the old
+    --solana-version, --compiler-solana-version,
+    --fallback-compiler-solana-version and --platform-tools-version options
+    are gone.
 EOF
 }
 
@@ -50,10 +48,6 @@ FACTORY_DIR="$SCRIPT_DIR"
 VERSIONS_DIR="$FACTORY_DIR/versions"
 STATE_DIR="$FACTORY_DIR/run-state"
 
-SOLANA_VERSION=""
-COMPILER_SOLANA_VERSION=""
-FALLBACK_COMPILER_SOLANA_VERSION=""
-PLATFORM_TOOLS_VERSION=""
 SCOPE="all"
 INCLUDE_RE=""
 EXCLUDE_RE=""
@@ -64,21 +58,8 @@ CLEANUP_SOLANA=0
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
-	--solana-version)
-		SOLANA_VERSION="$2"
-		shift 2
-		;;
-	--compiler-solana-version)
-		COMPILER_SOLANA_VERSION="$2"
-		shift 2
-		;;
-	--fallback-compiler-solana-version)
-		FALLBACK_COMPILER_SOLANA_VERSION="$2"
-		shift 2
-		;;
-	--platform-tools-version)
-		PLATFORM_TOOLS_VERSION="$2"
-		shift 2
+	--solana-version|--compiler-solana-version|--fallback-compiler-solana-version|--platform-tools-version)
+		die "$1 was removed: build_crate.py now picks the toolchain per crate version"
 		;;
 	--scope)
 		SCOPE="$2"
@@ -125,11 +106,6 @@ while [ "$#" -gt 0 ]; do
 		;;
 	esac
 done
-
-[ -n "$SOLANA_VERSION" ] || die "--solana-version is required"
-[ -n "$COMPILER_SOLANA_VERSION" ] || die "--compiler-solana-version is required"
-[ -n "$FALLBACK_COMPILER_SOLANA_VERSION" ] || die "--fallback-compiler-solana-version is required"
-[ -n "$PLATFORM_TOOLS_VERSION" ] || die "--platform-tools-version is required"
 
 case "$SCOPE" in
 all|solana|anchor) ;;
@@ -184,10 +160,7 @@ fi
 log "Selected ${total} crates (scope=${SCOPE})"
 echo "selected_crates=${total}" >> "$RUN_SUMMARY"
 echo "scope=${SCOPE}" >> "$RUN_SUMMARY"
-echo "solana_version=${SOLANA_VERSION}" >> "$RUN_SUMMARY"
-echo "compiler_solana_version=${COMPILER_SOLANA_VERSION}" >> "$RUN_SUMMARY"
-echo "fallback_compiler_solana_version=${FALLBACK_COMPILER_SOLANA_VERSION}" >> "$RUN_SUMMARY"
-echo "platform_tools_version=${PLATFORM_TOOLS_VERSION}" >> "$RUN_SUMMARY"
+echo "toolchain=auto" >> "$RUN_SUMMARY"
 
 ok=0
 fail=0
@@ -218,10 +191,6 @@ while IFS= read -r crate; do
 
 	cmd=(
 		python3 "$FACTORY_DIR/get-rlibs-from-crate.py"
-		--solana-version "$SOLANA_VERSION"
-		--compiler-solana-version "$COMPILER_SOLANA_VERSION"
-		--fallback-compiler-solana-version "$FALLBACK_COMPILER_SOLANA_VERSION"
-		--platform-tools-version "$PLATFORM_TOOLS_VERSION"
 		--crate "$crate"
 		--versions-file "$versions_file"
 	)

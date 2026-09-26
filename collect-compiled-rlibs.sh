@@ -31,9 +31,10 @@ fi
 echo "[*] Collecting compiled release/deps rlibs from factory crates/"
 while IFS= read -r crate_dir; do
 	base="$(basename "$crate_dir")"
-	for target in sbf-solana-solana sbpfv3-solana-solana; do
-		release_dir="$crate_dir/target/$target/release"
+	# Solana <= 2.1 builds into sbf-solana-solana; Solana >= 2.2 into sbpfvN-solana-solana.
+	for release_dir in "$crate_dir"/target/sbf-solana-solana/release "$crate_dir"/target/sbpfv*-solana-solana/release; do
 		[ -d "$release_dir" ] || continue
+		target="$(basename "$(dirname "$release_dir")")"
 		dst_release="$OUT_DIR/crate-builds/$base/$target/release"
 		dst_deps="$OUT_DIR/crate-builds/$base/$target/release-deps"
 		mkdir -p "$dst_release" "$dst_deps"
