@@ -35,10 +35,19 @@ Darwin)
 esac
 
 TARGET="${_cputype}-${_ostype}"
-download_url="https://github.com/solana-labs/solana/releases/download/v${version}/solana-release-${TARGET}.tar.bz2"
+
+# Solana 2.x+ releases moved to anza-xyz/agave
+major_version=$(echo "$version" | cut -d. -f1)
+if [ "$major_version" -ge 2 ]; then
+	repo="anza-xyz/agave"
+else
+	repo="solana-labs/solana"
+fi
+
+download_url="https://github.com/${repo}/releases/download/v${version}/solana-release-${TARGET}.tar.bz2"
 archive="solana-release-${TARGET}.tar.bz2"
 
-echo "Downloading ${archive} from ${download_url}"
+echo "Downloading from ${repo}: ${download_url}"
 wget "$download_url" -O "$archive"
 tar -xvf "$archive"
 rm -f "$archive"
